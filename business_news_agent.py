@@ -30,29 +30,45 @@ from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
 OUTPUT_DIR = Path("daily_reports")
-MAX_ITEMS = 15
 
-# Mainstream/public RSS feeds (Japan major topics)
-RSS_FEEDS = [
-    "https://www3.nhk.or.jp/rss/news/cat0.xml",  # top
-    "https://www3.nhk.or.jp/rss/news/cat1.xml",  # social
-    "https://www3.nhk.or.jp/rss/news/cat4.xml",  # politics
-    "https://www3.nhk.or.jp/rss/news/cat5.xml",  # international
-    "https://www3.nhk.or.jp/rss/news/cat6.xml",  # economy
-    "https://www3.nhk.or.jp/rss/news/cat7.xml",  # science/culture
-    "https://news.yahoo.co.jp/rss/topics/top-picks.xml",
-    "https://news.yahoo.co.jp/rss/topics/domestic.xml",
-    "https://news.yahoo.co.jp/rss/topics/world.xml",
-    "https://news.yahoo.co.jp/rss/topics/business.xml",
-    "https://news.yahoo.co.jp/rss/topics/it.xml",
-]
+# カテゴリごとの取得件数
+CATEGORY_LIMITS = {
+    "超主要": 3,
+    "食品・飲食": 3,
+    "AI最新": 2,
+    "国内": 2,
+}
 
+# 日本語ニュースのRSSフィード（カテゴリ別）
+RSS_FEEDS = {
+    "超主要": [
+        "https://www3.nhk.or.jp/rss/news/cat0.xml",
+        "https://news.yahoo.co.jp/rss/topics/top-picks.xml",
+    ],
+    "食品・飲食": [
+        "https://www3.nhk.or.jp/rss/news/cat6.xml",
+        "https://news.yahoo.co.jp/rss/topics/business.xml",
+        "https://news.yahoo.co.jp/rss/topics/domestic.xml",
+    ],
+    "AI最新": [
+        "https://www3.nhk.or.jp/rss/news/cat7.xml",
+        "https://news.yahoo.co.jp/rss/topics/it.xml",
+    ],
+    "国内": [
+        "https://www3.nhk.or.jp/rss/news/cat1.xml",
+        "https://news.yahoo.co.jp/rss/topics/domestic.xml",
+    ],
+}
+
+# カテゴリ判定キーワード
 CATEGORY_HINTS = {
-    "政治": ["政治", "国会", "選挙", "首相", "政府", "政策", "外務省"],
-    "経済": ["経済", "市場", "株", "金利", "為替", "決算", "企業", "物価", "インフレ"],
-    "社会": ["事故", "災害", "事件", "医療", "教育", "地域", "社会"],
-    "国際": ["国際", "米国", "中国", "欧州", "ウクライナ", "中東", "外交"],
-    "テクノロジー": ["ai", "生成ai", "半導体", "it", "テック", "宇宙", "科学"],
+    "超主要": ["速報", "緊急", "重大", "首相", "大統領", "震度", "台風", "戦争", "経済対策"],
+    "食品・飲食": ["食品", "飲食", "レストラン", "食料", "農業", "外食", "食材", "スーパー",
+                   "コンビニ", "食費", "物価", "値上げ", "食", "料理", "魚", "肉", "野菜"],
+    "AI最新": ["ai", "人工知能", "生成ai", "chatgpt", "claude", "llm", "機械学習",
+               "ディープラーニング", "openai", "google", "microsoft", "半導体"],
+    "国内": ["国内", "日本", "都道府県", "市区町村", "政府", "厚生労働省", "文部科学省",
+             "警察", "裁判", "選挙", "国会"],
 }
 
 
@@ -103,13 +119,9 @@ def parse_rss(xml_text: str, source_url: str) -> list[NewsItem]:
     return items
 
 
-def score_item(item: NewsItem) -> int:
+def score_item(item: NewsItem, category: str) -> int:
     haystack = f"{item.title} {item.summary}".lower()
-    score = 0
-    for words in CATEGORY_HINTS.values():
-        for kw in words:
-            if kw.lower() in haystack:
-                score += 1
+    score = sum(1 for kw in CATEGORY_HINTS.get(category, []) if kw.lower() in haystack)
     if len(item.title) <= 60:
         score += 1
     return score
@@ -137,34 +149,43 @@ def dedupe_items(items: list[NewsItem]) -> list[NewsItem]:
     return result
 
 
-def collect_news() -> list[NewsItem]:
-    all_items: list[NewsItem] = []
-    for url in RSS_FEEDS:
-        try:
-            xml_text = fetch_url(url)
-        except (urllib.error.URLError, TimeoutError):
-            continue
-        all_items.extend(parse_rss(xml_text, source_url=url))
+def collect_news() -> dict[str, list[NewsItem]]:
+    """カテゴリごとにニュースを収集して返す"""
+    all_seen: list[NewsItem] = []
+    result: dict[str, list[NewsItem]] = {}
 
-    all_items = dedupe_items(all_items)
-    all_items.sort(key=score_item, reverse=True)
-    return all_items[:MAX_ITEMS]
+    for category, urls in RSS_FEEDS.items():
+        items: list[NewsItem] = []
+        for url in urls:
+            try:
+                xml_text = fetch_url(url)
+            except (urllib.error.URLError, TimeoutError):
+                continue
+            items.extend(parse_rss(xml_text, source_url=url))
+
+        # カテゴリ内重複除去
+        items = dedupe_items(items)
+        # 全カテゴリ横断の重複除去
+        unique = []
+        for item in items:
+            if not any(similar(item.title, seen.title) for seen in all_seen):
+                unique.append(item)
+                all_seen.append(item)
+
+        # カテゴリスコアで並び替えて件数制限
+        unique.sort(key=lambda x: score_item(x, category), reverse=True)
+        limit = CATEGORY_LIMITS.get(category, 3)
+        result[category] = unique[:limit]
+
+    return result
 
 
 # ──────────────────────────────────────────────
 # カテゴリ判定
 # ──────────────────────────────────────────────
 
-def detect_category(item: NewsItem) -> str:
-    haystack = f"{item.title} {item.summary}".lower()
-    best_name = "その他"
-    best_score = 0
-    for category, words in CATEGORY_HINTS.items():
-        score = sum(1 for w in words if w.lower() in haystack)
-        if score > best_score:
-            best_score = score
-            best_name = category
-    return best_name
+def detect_category(item: NewsItem, category: str = "") -> str:
+    return category if category else "その他"
 
 
 # ──────────────────────────────────────────────
@@ -177,9 +198,10 @@ def generate_ai_summary(items: list[NewsItem], now_jst: dt.datetime) -> str:
         return "（ANTHROPIC_API_KEY が未設定のため要約をスキップしました）"
 
     date_str = now_jst.strftime("%Y年%m月%d日（%a）")
+    all_items = [item for cat_items in items.values() for item in cat_items] if isinstance(items, dict) else items
     news_text = "\n\n".join(
-        f"{i+1}. [{detect_category(item)}] {item.title}\n{item.summary or '（詳細なし）'}"
-        for i, item in enumerate(items)
+        f"{i+1}. {item.title}\n{item.summary or '（詳細なし）'}"
+        for i, item in enumerate(all_items)
     )
     prompt = (
         f"あなたはビジネスパーソン向けのニュース編集者です。"
@@ -217,16 +239,15 @@ def generate_ai_summary(items: list[NewsItem], now_jst: dt.datetime) -> str:
 # ──────────────────────────────────────────────
 
 CATEGORY_BADGE = {
-    "政治": "🏛",
-    "経済": "📈",
-    "社会": "🏙",
-    "国際": "🌏",
-    "テクノロジー": "💻",
+    "超主要": "🔥",
+    "食品・飲食": "🍽",
+    "AI最新": "🤖",
+    "国内": "🗾",
     "その他": "📰",
 }
 
 
-def make_briefing_text(items: list[NewsItem], ai_summary: str, now_jst: dt.datetime) -> str:
+def make_briefing_text(news_by_cat: dict, ai_summary: str, now_jst: dt.datetime) -> str:
     date_str = now_jst.strftime("%Y-%m-%d (%a)")
     lines = [
         f"【朝5時 日本の主要ニュース要約】{date_str}",
@@ -234,38 +255,47 @@ def make_briefing_text(items: list[NewsItem], ai_summary: str, now_jst: dt.datet
         "■ AI要約",
         ai_summary,
         "",
-        "■ 今日押さえるニュース",
+        "■ 今日のニュース",
     ]
-    if not items:
-        lines.append("- ニュースを取得できませんでした。")
-    else:
+    for cat, items in news_by_cat.items():
+        badge = CATEGORY_BADGE.get(cat, "📰")
+        lines.append(f"")
+        lines.append(f"{badge} {cat}")
+        if not items:
+            lines.append("  - 該当ニュースなし")
         for item in items:
-            cat = detect_category(item)
-            badge = CATEGORY_BADGE.get(cat, "📰")
             snippet = item.summary or "詳細はリンク先を確認してください。"
             if len(snippet) > 90:
                 snippet = snippet[:87] + "..."
-            lines.append(f"- {badge}[{cat}] {item.title} / {snippet}")
+            lines.append(f"  - {item.title} / {snippet}")
 
+    all_items = [item for items in news_by_cat.values() for item in items]
     lines += ["", "■ 参照リンク"]
-    for item in items:
+    for item in all_items:
         lines.append(f"- {item.link}")
     return "\n".join(lines)
 
 
-def make_briefing_html(items: list[NewsItem], ai_summary: str, now_jst: dt.datetime) -> str:
+def make_briefing_html(news_by_cat: dict, ai_summary: str, now_jst: dt.datetime) -> str:
     date_str = now_jst.strftime("%Y年%m月%d日（%A）")
     rows = ""
-    for item in items:
-        cat = detect_category(item)
+    for cat, items in news_by_cat.items():
         badge = CATEGORY_BADGE.get(cat, "📰")
-        snippet = item.summary or ""
-        if len(snippet) > 100:
-            snippet = snippet[:97] + "..."
         rows += f"""
         <tr>
-          <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">
-            <span style="display:inline-block;background:#f0f4ff;color:#3b5bdb;font-size:11px;padding:2px 8px;border-radius:12px;margin-bottom:4px;">{badge} {cat}</span><br>
+          <td colspan="1" style="padding:10px 12px;background:#f8f9ff;border-bottom:1px solid #e8eaf0;">
+            <span style="font-size:13px;font-weight:600;color:#1a1a2e;">{badge} {cat}</span>
+          </td>
+        </tr>"""
+        if not items:
+            rows += '<tr><td style="padding:8px 12px;color:#999;font-size:13px;">該当ニュースなし</td></tr>'
+        for item in items:
+            snippet = item.summary or ""
+            if len(snippet) > 100:
+                snippet = snippet[:97] + "..."
+            rows += f"""
+        <tr>
+          <td style="padding:10px 12px 10px 24px;border-bottom:1px solid #f0f0f0;vertical-align:top;">
             <a href="{item.link}" style="color:#1a1a2e;font-size:14px;font-weight:600;text-decoration:none;">{item.title}</a><br>
             <span style="color:#666;font-size:12px;">{snippet}</span>
           </td>
@@ -350,13 +380,14 @@ def run_once() -> None:
     now_jst = dt.datetime.now(JST)
     print(f"[{now_jst.isoformat()}] ニュース収集を開始します...")
 
-    items = collect_news()
-    print(f"  {len(items)} 件のニュースを取得しました")
+    news_by_cat = collect_news()
+    total = sum(len(v) for v in news_by_cat.values())
+    print(f"  {total} 件のニュースを取得しました")
 
-    ai_summary = generate_ai_summary(items, now_jst)
+    ai_summary = generate_ai_summary(news_by_cat, now_jst)
 
-    text_body = make_briefing_text(items, ai_summary, now_jst)
-    html_body = make_briefing_html(items, ai_summary, now_jst)
+    text_body = make_briefing_text(news_by_cat, ai_summary, now_jst)
+    html_body = make_briefing_html(news_by_cat, ai_summary, now_jst)
 
     path = save_briefing(text_body, now_jst)
     print(text_body)
