@@ -115,14 +115,24 @@ def score_item(item: NewsItem) -> int:
     return score
 
 
+def similar(a: str, b: str) -> bool:
+    a = re.sub(r"\W+", "", a.lower())
+    b = re.sub(r"\W+", "", b.lower())
+    if a == b:
+        return True
+    if len(a) >= 20 and len(b) >= 20 and a[:20] == b[:20]:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) >= 15 and shorter in longer:
+        return True
+    return False
+
+
 def dedupe_items(items: list[NewsItem]) -> list[NewsItem]:
-    seen: set[str] = set()
     result: list[NewsItem] = []
     for item in items:
-        key = re.sub(r"\W+", "", item.title.lower())
-        if key in seen:
+        if any(similar(item.title, seen.title) for seen in result):
             continue
-        seen.add(key)
         result.append(item)
     return result
 
